@@ -12,16 +12,26 @@ from app.config import settings
 def clone_repo(github_url: str) -> str:
     """
     Clones a GitHub repository to a temporary directory.
-    Returns the path to the cloned repository.
+    Uses the GITHUB_TOKEN from settings for authentication.
     """
     temp_dir = tempfile.mkdtemp(prefix="codegalaxy_")
+    
+    # Inject token if available for private/rate-limited repos
+    clone_url = github_url
+    if settings.github_token:
+        # Expected github_url format: https://github.com/owner/repo.git
+        if github_url.startswith("https://github.com/"):
+            clone_url = github_url.replace("https://github.com/", f"https://{settings.github_token}@github.com/")
+
     try:
-        Repo.clone_from(github_url, temp_dir, depth=1)
+        Repo.clone_from(clone_url, temp_dir, depth=1)
         return temp_dir
     except Exception as e:
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
-        raise RuntimeError(f"Failed to clone repository: {e}")
+        # Scrub token from error message for security
+        err_msg = str(e).replace(settings.github_token, "REDACTED_TOKEN") if settings.github_token else str(e)
+        raise RuntimeError(f"Failed to clone repository: {err_msg}")
 
 async def get_source_files(repo_path: str):
     """

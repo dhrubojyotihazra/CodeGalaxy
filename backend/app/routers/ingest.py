@@ -18,8 +18,10 @@ async def _run_pipeline(repo_id: int, owner: str, repo: str, branch: str):
     """
     Parallelized background task for high-speed repository ingestion using local cloning.
     Uses multiple sessions to prevent long-held SQLite locks.
+    Limit concurrency to prevent OOM on restricted environments (HFS).
     """
     from app.models.database import async_session
+    sem = asyncio.Semaphore(20) # Limit to 20 concurrent intensive tasks
 
     repo_path = None
     all_paths = []
@@ -57,9 +59,13 @@ async def _run_pipeline(repo_id: int, owner: str, repo: str, branch: str):
                 await db.commit()
             return
 
-        # 3. Parallel Parse
+        # 3. Parallel Parse (with concurrency control)
+        async def _bounded_parse(p, c):
+            async with sem:
+                return await parser.parse_file_async(p, c)
+
         parse_tasks = [
-            parser.parse_file_async(f["path"], f["content"]) 
+            _bounded_parse(f["path"], f["content"]) 
             for f in files_data
         ]
         parsed_results = await asyncio.gather(*parse_tasks)
@@ -154,8 +160,13 @@ async def _run_pipeline(repo_id: int, owner: str, repo: str, branch: str):
             result = await db.execute(select(FileNode).where(FileNode.repo_id == repo_id))
             nodes = result.scalars().all()
             
+            # Use the same semaphore to limit analysis CPU/Memory usage
+            async def _bounded_analyze(c, l, lc, fc, ic):
+                async with sem:
+                    return await analyzer.analyze_file_async(c, l, lc, fc, ic)
+
             analysis_tasks = [
-                analyzer.analyze_file_async(
+                _bounded_analyze(
                     node.content, node.language, node.loc, 
                     node.function_count, len(node.imports or [])
                 )
