@@ -18,12 +18,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Create data directory and ensure proper ownership for HFS user (UID 1000)
-RUN mkdir -p /app/data && chown -R 1000:1000 /app
+RUN mkdir -p /app/data/hf_cache /app/data/numba_cache && chown -R 1000:1000 /app/data
 
 # AI Environment Patch: Provide a system username and writable cache for Hugging Face/PyTorch/Numba
 ENV USER=codegalaxy
 ENV HF_HOME=/app/data/hf_cache
-ENV NUMBA_CACHE_DIR=/tmp
+ENV NUMBA_CACHE_DIR=/app/data/numba_cache
 
 USER 1000
 

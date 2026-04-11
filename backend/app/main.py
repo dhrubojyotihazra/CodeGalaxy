@@ -2,6 +2,10 @@
 CodeGalaxy Backend - FastAPI Application Entry Point
 """
 from contextlib import asynccontextmanager
+import os
+# Force Numba cache to writable data volume before any other imports
+os.environ["NUMBA_CACHE_DIR"] = "/app/data/numba_cache"
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
