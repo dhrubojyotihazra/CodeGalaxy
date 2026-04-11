@@ -20,9 +20,10 @@ COPY . .
 # Create data directory and ensure proper ownership for HFS user (UID 1000)
 RUN mkdir -p /app/data && chown -R 1000:1000 /app
 
-# AI Environment Patch: Provide a system username and writable cache for Hugging Face/PyTorch
+# AI Environment Patch: Provide a system username and writable cache for Hugging Face/PyTorch/Numba
 ENV USER=codegalaxy
 ENV HF_HOME=/app/data/hf_cache
+ENV NUMBA_CACHE_DIR=/tmp
 
 USER 1000
 
