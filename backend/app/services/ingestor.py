@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 import asyncio
+from typing import Optional
 from git import Repo
 from app.config import settings
 
