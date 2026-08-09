@@ -9,7 +9,7 @@ import asyncio
 from git import Repo
 from app.config import settings
 
-def clone_repo(github_url: str) -> str:
+def clone_repo(github_url: str, branch: Optional[str] = None) -> str:
     """
     Clones a GitHub repository to a temporary directory.
     Uses the GITHUB_TOKEN from settings for authentication.
@@ -24,7 +24,10 @@ def clone_repo(github_url: str) -> str:
             clone_url = github_url.replace("https://github.com/", f"https://{settings.github_token}@github.com/")
 
     try:
-        Repo.clone_from(clone_url, temp_dir, depth=1)
+        kwargs = {"depth": 1}
+        if branch:
+            kwargs["branch"] = branch
+        Repo.clone_from(clone_url, temp_dir, **kwargs)
         return temp_dir
     except Exception as e:
         if os.path.exists(temp_dir):

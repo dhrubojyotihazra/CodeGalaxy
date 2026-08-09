@@ -35,7 +35,7 @@ async def _run_pipeline(repo_id: int, owner: str, repo: str, branch: str):
             await db.commit()
             github_url = f"https://github.com/{owner}/{repo}.git"
             
-        repo_path = await asyncio.to_thread(ingestor.clone_repo, github_url)
+        repo_path = await asyncio.to_thread(ingestor.clone_repo, github_url, branch=branch)
         
         # 2. Traversal
         async with async_session() as db:
@@ -205,26 +205,29 @@ async def ingest_repo(
     db: AsyncSession = Depends(get_db),
 ):
     """Start ingestion of a GitHub repository."""
-    # 1. Quickly validate the repo and branch exist before starting pipeline
-    if not await github.check_repo_exists(request.owner, request.repo, request.branch):
-        raise HTTPException(
-            status_code=404, 
-            detail=f"Repository {request.owner}/{request.repo} or branch '{request.branch}' not found. Please check spelling."
-        )
+    owner = request.owner.strip()
+    repo = request.repo.strip().removesuffix(".git")
+    branch = request.branch.strip()
 
-    repo = Repository(
-        owner=request.owner,
-        name=request.repo,
-        branch=request.branch,
+    # 1. Quickly validate the repo and branch exist before starting pipeline
+    exists, resolved_branch, err_detail = await github.check_repo_exists(owner, repo, branch)
+    if not exists:
+        detail_msg = err_detail or f"Repository {owner}/{repo} or branch '{branch}' not found. Please check spelling."
+        raise HTTPException(status_code=404, detail=detail_msg)
+
+    repo_obj = Repository(
+        owner=owner,
+        name=repo,
+        branch=resolved_branch,
         status="pending",
     )
-    db.add(repo)
+    db.add(repo_obj)
     await db.commit()
-    await db.refresh(repo)
+    await db.refresh(repo_obj)
 
-    background_tasks.add_task(_run_pipeline, repo.id, request.owner, request.repo, request.branch)
+    background_tasks.add_task(_run_pipeline, repo_obj.id, owner, repo, resolved_branch)
 
-    return {"repo_id": repo.id, "status": "pending", "message": "Ingestion started"}
+    return {"repo_id": repo_obj.id, "status": "pending", "message": "Ingestion started"}
 
 
 @router.get("/ingest/{repo_id}/status", response_model=IngestStatusResponse)

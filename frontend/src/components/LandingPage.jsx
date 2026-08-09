@@ -309,8 +309,38 @@ export default function LandingPage({ onSuccess }) {
 
     const handleIngest = async (owner, repo, branch = 'main', originalUrl) => {
         setLoading(true); setError(''); setProgress({ status: 'starting', progress: 0 });
+
+        let result = null;
+        const maxRetries = 4;
+        
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                if (attempt > 1) {
+                    setProgress({ status: `Waking up Stellar Engine (Hugging Face cold start, attempt ${attempt}/${maxRetries})...`, progress: 0 });
+                }
+                result = await ingestRepo(owner.trim(), repo.trim(), branch.trim());
+                break; // Succeeded!
+            } catch (err) {
+                // If it's a 404 or specific validation error from backend, don't retry cold start
+                if (err.response?.status === 404 || err.response?.data?.detail) {
+                    setLoading(false);
+                    setError(err.response?.data?.detail || 'Repository or branch not found.');
+                    return;
+                }
+                // Network error or 503 from cold container
+                if (attempt === maxRetries) {
+                    setLoading(false);
+                    setError('Backend server connection timed out. If Hugging Face Space was asleep, please try clicking Generate Universe again in 10 seconds.');
+                    return;
+                }
+                // Wait 5s before retrying cold start
+                await new Promise(r => setTimeout(r, 5000));
+            }
+        }
+
+        if (!result) return;
+
         try {
-            const result = await ingestRepo(owner.trim(), repo.trim(), branch.trim());
             const repoId = result.repo_id;
             const pollInterval = setInterval(async () => {
                 try {
@@ -321,13 +351,13 @@ export default function LandingPage({ onSuccess }) {
                             clearInterval(pollInterval); setLoading(false);
                             onSuccess(repoId, originalUrl);
                         } else if (status.status === 'error') {
-                            clearInterval(pollInterval); setLoading(false); setError('Ingestion failed.');
+                            clearInterval(pollInterval); setLoading(false); setError('Ingestion failed during processing.');
                         }
                     }
                 } catch { }
             }, 2000);
         } catch (err) {
-            setLoading(false); setError(err.response?.data?.detail || 'Failed to start ingestion.');
+            setLoading(false); setError(err.response?.data?.detail || 'Failed to poll ingestion status.');
         }
     };
 

@@ -61,4 +61,13 @@ export async function getFileSummary(fileId) {
     return res.data;
 }
 
+export async function pingBackend() {
+    try {
+        const res = await axios.get(`${BACKEND_URL}/ping`, { timeout: 15000 });
+        return res.status === 200;
+    } catch {
+        return false;
+    }
+}
+
 export default api;

@@ -7,7 +7,7 @@ export function parseGithubUrl(url) {
     if (!url || typeof url !== 'string') return null;
 
     // Clean URL
-    const cleanUrl = url.trim().replace(/\/$/, '');
+    let cleanUrl = url.trim().replace(/\/$/, '');
 
     // Pattern: https://github.com/owner/repo/tree/branch or https://github.com/owner/repo
     const regex = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^\/]+)\/([^\/]+)(?:\/tree\/([^\/]+))?/;
@@ -16,7 +16,7 @@ export function parseGithubUrl(url) {
     if (match) {
         return {
             owner: match[1],
-            repo: match[2],
+            repo: match[2].replace(/\.git$/i, ''),
             branch: match[3] || 'main'
         };
     }
@@ -27,7 +27,7 @@ export function parseGithubUrl(url) {
     if (shortMatch) {
         return {
             owner: shortMatch[1],
-            repo: shortMatch[2],
+            repo: shortMatch[2].replace(/\.git$/i, ''),
             branch: 'main'
         };
     }
