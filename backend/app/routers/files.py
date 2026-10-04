@@ -53,9 +53,122 @@ async def get_file_detail(file_id: int, db: AsyncSession = Depends(get_db)):
         fan_out=fan_out or 0,
     )
 
+async def _call_llm_summary(path: str, code_snippet: str) -> str:
+    """Helper to request AI architectural summary with multi-model fallback."""
+    prompt = f"""You are a senior software architect. Provide a concise, 2-3 sentence plain-English summary explaining the primary purpose of this file.
+Analyze its logic to understand its role. Do NOT list the functions. Explain *why* it exists.
+
+File path: {path}
+Code:
+```
+{code_snippet[:8000]}
+```
+"""
+
+    # 1. Try Groq
+    if settings.groq_api_key:
+        groq_candidates = [
+            settings.groq_model,
+            "qwen/qwen3.8-27b",
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant"
+        ]
+        seen = set()
+        models_to_try = [m for m in groq_candidates if m and not (m in seen or seen.add(m))]
+
+        headers = {
+            "Authorization": f"Bearer {settings.groq_api_key}",
+            "Content-Type": "application/json"
+        }
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for model_id in models_to_try:
+                try:
+                    payload = {
+                        "model": model_id,
+                        "messages": [
+                            {"role": "system", "content": "You provide extremely clear, concise architectural intuition about code files."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": 150
+                    }
+                    resp = await client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        summary = data["choices"][0]["message"]["content"].strip()
+                        if summary:
+                            return summary
+                    elif resp.status_code == 404:
+                        continue  # Model not found on this account/tier, try next
+                    else:
+                        print(f"Groq API error ({model_id}): {resp.status_code} - {resp.text}")
+                except Exception as e:
+                    print(f"Groq call exception ({model_id}): {e}")
+
+    # 2. Try OpenRouter fallback
+    if settings.openrouter_api_key:
+        try:
+            headers = {
+                "Authorization": f"Bearer {settings.openrouter_api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "google/gemini-2.5-flash",
+                "messages": [
+                    {"role": "system", "content": "You provide extremely clear, concise architectural intuition about code files."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.3,
+                "max_tokens": 150
+            }
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    summary = data["choices"][0]["message"]["content"].strip()
+                    if summary:
+                        return summary
+        except Exception as e:
+            print(f"OpenRouter fallback error: {e}")
+
+    # 3. Try OpenAI fallback
+    if settings.openai_api_key:
+        try:
+            headers = {
+                "Authorization": f"Bearer {settings.openai_api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {"role": "system", "content": "You provide extremely clear, concise architectural intuition about code files."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.3,
+                "max_tokens": 150
+            }
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    summary = data["choices"][0]["message"]["content"].strip()
+                    if summary:
+                        return summary
+        except Exception as e:
+            print(f"OpenAI fallback error: {e}")
+
+    if not (settings.groq_api_key or settings.openrouter_api_key or settings.openai_api_key):
+        return "Please set GROQ_API_KEY in Space secrets to enable AI summaries."
+
+    return "STATION_UPLINK_FAILURE: AI analysis service currently unavailable. Please verify API key in settings."
+
+
 @router.post("/files/{file_id}/summary")
 async def generate_file_summary(file_id: int, db: AsyncSession = Depends(get_db)):
-    """Generate a brief 2-3 sentence summary of the file using OpenRouter/OpenAI API."""
+    """Generate a brief 2-3 sentence summary of the file using LLM API."""
     file_node = await db.get(FileNode, file_id)
     if not file_node:
         raise HTTPException(status_code=404, detail="File not found")
@@ -63,61 +176,10 @@ async def generate_file_summary(file_id: int, db: AsyncSession = Depends(get_db)
     if not file_node.content:
         return {"summary": "No raw code available for this file."}
 
-    # Prioritize Groq, then OpenRouter, then OpenAI
-    api_key = settings.groq_api_key
-    base_url = "https://api.groq.com/openai/v1/chat/completions"
-    model = "llama-3.1-8b-instant"
-    
-    if not api_key:
-        api_key = settings.openrouter_api_key
-        base_url = "https://openrouter.ai/api/v1/chat/completions"
-        model = "google/gemini-2.5-flash"
-        
-        if not api_key:
-             api_key = settings.openai_api_key
-             base_url = "https://api.openai.com/v1/chat/completions"
-             model = "gpt-4o-mini"
-             if not api_key:
-                 return {"summary": "Please set GROQ_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY to enable AI summaries."}
+    summary = await _call_llm_summary(file_node.path, file_node.content)
+    return {"summary": summary}
 
-    prompt = f"""You are a senior software architect. Provide a concise, 2-3 sentence plain-English summary explaining the primary purpose of this file within the repository.
-Analyze its imports and exports to understand its role. Do NOT list the functions. Explain *why* it exists.
 
-File path: {file_node.path}
-Language: {file_node.language}
-
-Code:
-```
-{file_node.content[:8000]} 
-```
-"""
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": "You provide extremely clear, concise architectural intuition about code files."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.3,
-        "max_tokens": 150
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(base_url, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-            summary = data["choices"][0]["message"]["content"].strip()
-            return {"summary": summary}
-            
-    except Exception as e:
-        print(f"Error generating summary: {e}")
-        return {"summary": f"Failed to generate AI summary. Status: {getattr(e, 'response', 'Network Error')}."}
 @router.post("/ai/summarize-code")
 async def summarize_raw_code(data: dict = Body(...), db: AsyncSession = Depends(get_db)):
     """Proxy endpoint to generate summary for raw code without a DB file ID."""
@@ -126,55 +188,5 @@ async def summarize_raw_code(data: dict = Body(...), db: AsyncSession = Depends(
     if not code:
         return {"summary": "No code provided for analysis."}
 
-    # Reuse the same logic as above
-    api_key = settings.groq_api_key
-    base_url = "https://api.groq.com/openai/v1/chat/completions"
-    model = "llama-3.1-8b-instant"
-    
-    if not api_key:
-        api_key = settings.openrouter_api_key
-        base_url = "https://openrouter.ai/api/v1/chat/completions"
-        model = "google/gemini-2.0-flash" # Updated model
-        
-        if not api_key:
-             api_key = settings.openai_api_key
-             base_url = "https://api.openai.com/v1/chat/completions"
-             model = "gpt-4o-mini"
-             if not api_key:
-                 return {"summary": "Please set GROQ_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY to enable AI summaries."}
-
-    prompt = f"""You are a senior software architect. Provide a concise, 2-3 sentence plain-English summary explaining the primary purpose of this file.
-Analyze its logic to understand its role. Do NOT list the functions. Explain *why* it exists.
-
-File path: {path}
-Code:
-```
-{code[:8000]} 
-```
-"""
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": "You provide extremely clear, concise architectural intuition about code files."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.3,
-        "max_tokens": 150
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(base_url, headers=headers, json=payload)
-            response.raise_for_status()
-            ai_data = response.json()
-            summary = ai_data["choices"][0]["message"]["content"].strip()
-            return {"summary": summary}
-    except Exception as e:
-        print(f"Proxy error: {e}")
-        return {"summary": "STATION_UPLINK_FAILURE: AI analysis unavailable."}
+    summary = await _call_llm_summary(path, code)
+    return {"summary": summary}

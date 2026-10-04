@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     # Embedding model: "local" or "openrouter"
     embedding_model: str = "local"
     groq_api_key: Optional[str] = None
+    groq_model: str = "qwen/qwen3.8-27b"
     openrouter_api_key: Optional[str] = None
     openai_api_key: Optional[str] = None
 
