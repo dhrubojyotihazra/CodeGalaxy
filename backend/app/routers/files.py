@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 import httpx
+import time
 from app.config import settings
 
 from app.models.database import get_db, FileNode, Edge
@@ -53,8 +54,58 @@ async def get_file_detail(file_id: int, db: AsyncSession = Depends(get_db)):
         fan_out=fan_out or 0,
     )
 
+_cached_groq_models: list[str] = []
+_groq_cache_timestamp: float = 0.0
+
+async def _get_active_groq_models(api_key: str) -> list[str]:
+    """
+    Dynamically discover all active models directly from Groq API.
+    Auto-ranks coding/chat models and filters out non-chat models.
+    Caches for 15 minutes to preserve sub-second response times.
+    """
+    global _cached_groq_models, _groq_cache_timestamp
+    now = time.time()
+    if _cached_groq_models and (now - _groq_cache_timestamp < 900):
+        return _cached_groq_models
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.get("https://api.groq.com/openai/v1/models", headers=headers)
+            if resp.status_code == 200:
+                raw_ids = [m["id"] for m in resp.json().get("data", [])]
+                # Filter out audio, whisper, prompt guard, vision/rerank
+                chat_models = [
+                    m_id for m_id in raw_ids 
+                    if not any(x in m_id.lower() for x in ["whisper", "guard", "orpheus", "embed", "rerank"])
+                ]
+                
+                def rank_score(m: str) -> int:
+                    ml = m.lower()
+                    if "qwen" in ml: return 100
+                    if "llama-3.3" in ml: return 95
+                    if "llama-3.1" in ml: return 90
+                    if "deepseek" in ml: return 85
+                    if "gpt-oss-120b" in ml: return 80
+                    if "gpt-oss" in ml: return 75
+                    if "llama" in ml: return 70
+                    return 20
+
+                sorted_models = sorted(chat_models, key=rank_score, reverse=True)
+                if sorted_models:
+                    _cached_groq_models = sorted_models
+                    _groq_cache_timestamp = now
+                    return _cached_groq_models
+        except Exception as e:
+            print(f"Dynamic Groq model discovery exception: {e}")
+
+    # Fallback list if discovery fails
+    return _cached_groq_models or ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.3-70b-versatile"]
+
+
 async def _call_llm_summary(path: str, code_snippet: str) -> str:
     """Helper to request AI architectural summary with multi-model fallback."""
+    global _cached_groq_models, _groq_cache_timestamp
     prompt = f"""You are a senior software architect. Provide a concise, 2-3 sentence plain-English summary explaining the primary purpose of this file.
 Analyze its logic to understand its role. Do NOT list the functions. Explain *why* it exists.
 
@@ -65,18 +116,17 @@ Code:
 ```
 """
 
-    # 1. Try Groq
+    # 1. Try Groq with dynamic auto-discovered active models
     if settings.groq_api_key:
-        groq_candidates = [
-            settings.groq_model,
-            "qwen/qwen3.8-27b",
-            "openai/gpt-oss-120b",
-            "openai/gpt-oss-20b",
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant"
-        ]
-        seen = set()
-        models_to_try = [m for m in groq_candidates if m and not (m in seen or seen.add(m))]
+        active_models = await _get_active_groq_models(settings.groq_api_key)
+        
+        # User configured model takes precedence if set, followed by auto-discovered active models
+        models_to_try = []
+        if settings.groq_model:
+            models_to_try.append(settings.groq_model)
+        for m in active_models:
+            if m not in models_to_try:
+                models_to_try.append(m)
 
         headers = {
             "Authorization": f"Bearer {settings.groq_api_key}",
@@ -102,7 +152,11 @@ Code:
                         if summary:
                             return summary
                     elif resp.status_code == 404:
-                        continue  # Model not found on this account/tier, try next
+                        # Model was deprecated or removed by Groq!
+                        # Invalidate cache so next request queries Groq's live model catalog
+                        _cached_groq_models = []
+                        _groq_cache_timestamp = 0.0
+                        continue
                     else:
                         print(f"Groq API error ({model_id}): {resp.status_code} - {resp.text}")
                 except Exception as e:
